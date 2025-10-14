@@ -1,19 +1,27 @@
 $(document).ready(function() {
-    const csvFilePath = '사양견적관리.csv';
+    const csvFiles = ['사양견적관리.csv', '견적관련db.csv'];
     const db = {}; // 데이터를 저장할 전역 객체
 
     // 1. CSV 데이터 로드 및 파싱 (최초 1회)
     async function loadData() {
         try {
-            const response = await fetch(csvFilePath);
-            const csvText = await response.text();
-            parseCSV(csvText);
-            precomputeHashes(); // 스펙 해시 계산 호출
+            const responses = await Promise.all(csvFiles.map(file => fetch(file)));
+            const csvTexts = await Promise.all(responses.map(res => res.text()));
+
+            csvTexts.forEach(text => parseCSV(text));
+
+            // 데이터 가공 함수들 순차적 호출
+            precomputeFullSpecText();
+            precomputeAvgActualCost();
+            precomputeHashes();
+            
+            console.log("모든 데이터 준비 완료:", db);
+
             // 데이터 로드 후 첫 페이지 로드
             loadInitialPage();
         } catch (error) {
-            console.error("데이터 로딩 실패:", error);
-            alert("기준 데이터 파일을 불러오는 데 실패했습니다.");
+            console.error("데이터 로딩 또는 가공 실패:", error);
+            alert("기준 데이터 파일을 불러오거나 처리하는 데 실패했습니다.");
         }
     }
 
@@ -43,7 +51,6 @@ $(document).ready(function() {
         for (const line of lines) {
             if (!line.trim()) { currentTableName = null; headers = []; continue; }
             
-            // Use the new, more robust CSV line parser
             const columns = parseCsvLine(line);
 
             const potentialTableName = columns[0];
@@ -66,10 +73,69 @@ $(document).ready(function() {
                 }
             }
         }
-        console.log("중앙 데이터 파싱 완료:", db);
     }
 
-    // 스펙 해시 미리 계산
+    // '항목명:값' 형식의 전체 스펙 텍스트 미리 계산
+    function precomputeFullSpecText() {
+        db.unitFullSpecText = {};
+        if (!db.유닛품번리스트 || !db.유닛품번스펙정보) return;
+
+        db.유닛품번리스트.forEach(part => {
+            const specTexts = db.유닛품번스펙정보
+                .filter(s => String(s.유닛품번코드) === String(part.유닛품번코드))
+                .sort((a, b) => a.스펙항목코드.localeCompare(b.스펙항목코드)) // 항목 순서 고정
+                .map(s => `${s.스펙항목명}:${s.스펙명}`)
+                .join(' / ');
+            
+            if (specTexts) {
+                db.unitFullSpecText[part.유닛품번코드] = specTexts;
+            }
+        });
+        console.log("전체 스펙 텍스트 계산 완료:", db.unitFullSpecText);
+    }
+
+    // 실적원가 6개월 평균 미리 계산
+    function precomputeAvgActualCost() {
+        db.avgActualCosts = {};
+        if (!db.유닛품번실적원가) return;
+
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+        const costsByPart = {};
+
+        db.유닛품번실적원가.forEach(record => {
+            const year = parseInt(String(record.년월).substring(0, 4), 10);
+            const month = parseInt(String(record.년월).substring(4, 6), 10) - 1;
+            const recordDate = new Date(year, month);
+
+            if (recordDate >= sixMonthsAgo) {
+                if (!costsByPart[record.유닛품번코드]) {
+                    costsByPart[record.유닛품번코드] = {
+                        direct: [], indirect: [], outsourced: [], internal: []
+                    };
+                }
+                costsByPart[record.유닛품번코드].direct.push(parseFloat(record.직접재료비) || 0);
+                costsByPart[record.유닛품번코드].indirect.push(parseFloat(record.간접재료비) || 0);
+                costsByPart[record.유닛품번코드].outsourced.push(parseFloat(record.외주임가공공수) || 0);
+                costsByPart[record.유닛품번코드].internal.push(parseFloat(record.본사가공공수) || 0);
+            }
+        });
+
+        const avg = (arr) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+        for (const partCode in costsByPart) {
+            db.avgActualCosts[partCode] = {
+                직접재료비: avg(costsByPart[partCode].direct),
+                간접재료비: avg(costsByPart[partCode].indirect),
+                외주임가공공수: avg(costsByPart[partCode].outsourced),
+                본사가공공수: avg(costsByPart[partCode].internal)
+            };
+        }
+        console.log("6개월 평균 실적원가 계산 완료:", db.avgActualCosts);
+    }
+
+    // 스펙 해시 미리 계산 (사양 검색용)
     function precomputeHashes() {
         db.unitSpecHashes = {};
         if (!db.유닛품번리스트 || !db.유닛품번스펙정보) return;
@@ -86,6 +152,7 @@ $(document).ready(function() {
         });
         console.log("스펙 해시 계산 완료:", db.unitSpecHashes);
     }
+
 
     // 2. 네비게이션 이벤트 핸들러
     // GNB 메뉴 클릭
